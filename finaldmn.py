@@ -15,6 +15,14 @@ import seq2seq
 #def cos(tensor1,tensor2):#by last dimension
 #    return tf.reduce_sum(tf.mul(norm(tensor1),norm(tensor2)),axis=-1)
 def last_relevant(output, length):
+    """ Return last time step of RNNs
+        Args:
+          output: RNNs output. 3D Tensors, [None, sequence length, rnn cell size]
+          length: sequence masking. 1D batch-sized int32 Tensors
+        
+        Returns:
+          last available time step of RNNs.
+    """
     batch_size = tf.shape(output)[0]
     max_length = tf.shape(output)[1]
     out_size = int(output.get_shape()[2])
