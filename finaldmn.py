@@ -1,6 +1,7 @@
 import tensorflow as tf
 import numpy as np
-import seq2seq
+from seq2seq import prelu, sample
+#import seq2seq
 
 #def norm(tensor):#normalzie last line
 #    """ Normalize tensor alone last dimension. Be equal to tf.nn.l2_normalize
@@ -32,7 +33,6 @@ def last_relevant(output, length):
     return relevant
 def softmax(inputs,mask):
     """ Calculate softmax with sequece mask.
-        
         Args:
           inputs: 2D tensor.
           mask: A 2D mask tensor. Corresponding to inputs sequence length, similiar to rnn sequence length.
@@ -51,7 +51,6 @@ class Model():
         self.q_max_length = q_max_length
         self.a_max_length = a_max_length
         self.rnn_size = rnn_size
-        #self.lr = 1e-2
         self.input_net = {}
         self.output_net = {}
         self.input_net['drop'] = tf.placeholder(tf.float32,[])
@@ -60,19 +59,14 @@ class Model():
         self.cell = tf.nn.rnn_cell.DropoutWrapper(self.cell,self.input_net['drop'])
         self.a_cell = tf.nn.rnn_cell.GRUCell(self.rnn_size)
         self.a_cell = tf.nn.rnn_cell.DropoutWrapper(self.a_cell,self.input_net['drop'])
-        self.fw_cell = tf.nn.rnn_cell.GRUCell(self.rnn_size/2)
-        self.bw_cell = tf.nn.rnn_cell.GRUCell(self.rnn_size/2)
-        self.result_cell = tf.nn.rnn_cell.GRUCell(self.rnn_size)
-        self.result_cell = tf.nn.rnn_cell.DropoutWrapper(self.result_cell,self.input_net['drop'])
+        self.fw_cell = tf.nn.rnn_cell.GRUCell(self.rnn_size)
+        self.bw_cell = tf.nn.rnn_cell.GRUCell(self.rnn_size)
+        #self.result_cell = tf.nn.rnn_cell.GRUCell(self.rnn_size)
+        #self.result_cell = tf.nn.rnn_cell.DropoutWrapper(self.result_cell,self.input_net['drop'])
         self.decoder_cell = tf.nn.rnn_cell.GRUCell(self.rnn_size)
         self.decoder_cell = tf.nn.rnn_cell.DropoutWrapper(self.decoder_cell,self.input_net['drop'])
         self.embedding_size = embedding_size
         self.num_symbol = num_symbol
-        #self.output_net['loss'] = 0.
-        #self.output_net['test_loss'] = 0.
-        #self.atten_sim = atten_sim
-        #self.atten_decoder = atten_decoder
-        #self.ss = ss
         self.sess = tf.Session()
         self.l2_loss1 = tf.constant(0.0)
         self.l2_loss2 = tf.constant(0.0)
@@ -82,6 +76,17 @@ class Model():
             for d in range(D):
                 encoding[d, j] = (1 - float(j+1)/M) - (float(d+1)/D)*(1 - 2.0*(j+1)/M)
         return np.transpose(encoding)
+    def positional_encoding2(self, embedding_size, sentence_size):#, embedding_size):
+        """Position encoding described in section 4.1 in "End to End Memory Networks" (http://arxiv.org/pdf/1503.08895v5.pdf)"""
+        encoding = np.ones((embedding_size, sentence_size), dtype=np.float32)
+        ls = sentence_size+1
+        le = embedding_size+1
+        for i in range(1, le):
+            for j in range(1, ls):
+                encoding[i-1, j-1] = (i - (le-1)/2) * (j - (ls-1)/2)
+        encoding = 1 + 4 * encoding / embedding_size / sentence_size
+        return np.transpose(encoding)
+
     def build_model(self,):
         self.input_net['d'] = tf.placeholder(tf.int32,[None,self.d_max_sent,self.d_max_length])
         self.input_net['q'] = tf.placeholder(tf.int32,[None,self.q_max_length])
@@ -91,16 +96,18 @@ class Model():
         self.input_net['a_mask'] = tf.placeholder(tf.int32,[None])
         self.input_net['d_sent_mask'] = tf.placeholder(tf.int32,[None])
         self.encoder_W = tf.Variable(tf.random_uniform([self.num_symbol,self.embedding_size],-3**0.5,3**0.5),name="embedding")
-        self.decoder_W = tf.Variable(tf.random_uniform([self.num_symbol,self.embedding_size],-3**0.5,3**0.5),name="embedding_decoder")
+        #self.decoder_W = tf.Variable(tf.random_uniform([self.num_symbol,self.embedding_size],-3**0.5,3**0.5),name="embedding_decoder")
         self.l2_loss1 += tf.nn.l2_loss(self.encoder_W)
         self.l2_loss2 += tf.nn.l2_loss(self.encoder_W)
-        self.l2_loss1 += tf.nn.l2_loss(self.decoder_W)
-        self.l2_loss2 += tf.nn.l2_loss(self.decoder_W)
+        #self.l2_loss1 += tf.nn.l2_loss(self.decoder_W)
+        #self.l2_loss2 += tf.nn.l2_loss(self.decoder_W)
         inner = self.rnn_size
         w1 = tf.get_variable("w1",[self.rnn_size*4,inner],initializer=tf.contrib.layers.xavier_initializer())
         b1 = tf.get_variable("b1",[1,inner],initializer=tf.contrib.layers.xavier_initializer())
         w2 = tf.get_variable("w2",[inner,1],initializer=tf.contrib.layers.xavier_initializer())
         b2 = tf.get_variable("b2",[1,1],initializer=tf.contrib.layers.xavier_initializer())
+        mem_update = tf.get_variable("mem_update",[self.rnn_size*3, self.rnn_size], initializer=tf.contrib.layers.xavier_initializer())
+        bias = tf.get_variable("bias",[self.rnn_size], initializer=tf.contrib.layers.xavier_initializer())
         # create variantional recurrent autoencoder 
         a_embed = tf.nn.embedding_lookup(self.encoder_W,self.input_net['a'][:,1:])
         _, a_enc_state = tf.nn.dynamic_rnn(
@@ -114,14 +121,14 @@ class Model():
             self.l2_loss1 += tf.nn.l2_loss(w_enc_latent)
             b_enc_latent = tf.get_variable("b_enc_latent",[2*self.latent_dim],dtype=tf.float32,initializer=tf.zeros_initializer)
             # encoder to mean and variance
-            self.mu_enc, self.sig_enc = tf.split(1, 2, seq2seq.prelu(tf.matmul(a_enc_state,w_enc_latent)+b_enc_latent))
+            self.mu_enc, self.sig_enc = tf.split(1, 2, prelu(tf.matmul(a_enc_state,w_enc_latent)+b_enc_latent))
             # sample latent space
-            z, self.kl_obj, self.kl_cost = seq2seq.sample(self.mu_enc, self.sig_enc, self.latent_dim, kl_min=4)
+            z, self.kl_obj, self.kl_cost = sample(self.mu_enc, self.sig_enc, self.latent_dim, kl_min=4)
         with tf.variable_scope('latent_to_decoder'):
             W_z = tf.get_variable("W_z",[self.latent_dim,self.rnn_size],initializer=tf.contrib.layers.xavier_initializer())
             bias_z = tf.get_variable("bias_z",[self.rnn_size],initializer=tf.zeros_initializer)
             self.l2_loss1 += tf.nn.l2_loss(W_z)
-            vae_decoder = seq2seq.prelu(tf.matmul(z,W_z)+bias_z)
+            vae_decoder = prelu(tf.matmul(z,W_z)+bias_z)
 
         ## read document to sentence vector
         #1
@@ -139,7 +146,8 @@ class Model():
         '''
         #2 Position Encoding
         ps = self.positional_encoding(self.embedding_size,self.d_max_length)
-        input_embed = [tf.nn.embedding_lookup(self.encoder_W,sent) for sent in tf.unpack(self.input_net['d'],axis=1)]
+        input_embed = tf.unpack(tf.nn.embedding_lookup(self.encoder_W, self.input_net['d']), axis=1)
+        #[tf.nn.embedding_lookup(self.encoder_W,sent) for sent in tf.unpack(self.input_net['d'],axis=1)]
         #len = self.d_max_sent
         d_mask = [tf.sequence_mask(mask,self.d_max_length,dtype=tf.float32) for mask in tf.unpack(self.input_net['d_mask'],axis=1)]
         reader_out = [tf.reduce_sum(ps * input_embed[i] * tf.expand_dims(d_mask[i],axis=2) ,axis=1)for i in range(self.d_max_sent)]
@@ -167,10 +175,11 @@ class Model():
                     tf.pack(reader_out,axis=1),
                     sequence_length=self.input_net['d_sent_mask'],
                     dtype=tf.float32)
-        reader_out = tf.concat_v2(temp,2)
+        reader_out = tf.reduce_sum(tf.stack(temp),axis=0)
+        #reader_out = tf.concat_v2(temp,2)
         
         self.m_prev = last_q
-        for hop in range(2):
+        for hop in range(1):
             # get content by attention
             self.attention_weight = []
             for i in range(self.d_max_sent):
@@ -178,7 +187,7 @@ class Model():
                 vec2 = tf.abs(reader_out[:,i] - last_q)
                 vec3 = reader_out[:,i] * self.m_prev
                 vec4 = tf.abs(reader_out[:,i] - self.m_prev)
-                vec = tf.concat(1,[vec1,vec2,vec3,vec4])
+                vec = tf.concat(1,[vec1, vec2, vec3, vec4])
                 self.attention_weight.append(tf.matmul(tf.tanh(tf.matmul(vec,w1) +b1),w2)+b2)
             self.attention_weight = tf.reshape(tf.pack(self.attention_weight,axis=1),[-1,self.d_max_sent])
             self.attention_weight = softmax(
@@ -186,21 +195,23 @@ class Model():
                     tf.sequence_mask(self.input_net['d_sent_mask'],self.d_max_sent,dtype=tf.float32))
             self.context_vec = tf.reduce_sum(reader_out * tf.expand_dims(self.attention_weight,axis=2),axis=1)
             # Update Memory
-            ## 1 ReLU 
-            #self.m_prev = tf.nn.relu(tf.matmul(tf.concat(1,[self.m_prev,self.context_vec,last_q]),mem_update)+bias)
-            ## 2 tied model
             with tf.variable_scope('mem_update') as vs:
                 if hop>0: vs.reuse_variables()
-                _, self.m_prev = tf.nn.dynamic_rnn(
-                    self.result_cell,
-                    tf.expand_dims(self.context_vec,axis=1),
-                    initial_state= self.m_prev)
+                ## 1 ReLU, untied
+                self.m_prev = tf.nn.relu(tf.matmul(tf.concat(1,[self.m_prev,self.context_vec,last_q]),mem_update)+bias)
+                ## 2 tied model
+            #    _, self.m_prev = tf.nn.dynamic_rnn(
+            #        self.result_cell,
+            #        tf.expand_dims(self.context_vec,axis=1),
+            #        initial_state= self.m_prev)
             #enc_out, enc_state = tf.nn.dynamic_rnn(
             #        self.result_cell,
             #        temp,
             #        sequence_length=self.input_net['d_sent_mask'],
             #        dtype=tf.float32)
         # output projection and sampled loss function
+        self.output_projection = None
+        softmax_loss_function = None
         w_t = tf.get_variable("proj_w", [self.num_symbol, self.rnn_size], dtype=tf.float32)
         w = tf.transpose(w_t)
         b = tf.get_variable("proj_b", [self.num_symbol])
@@ -214,45 +225,45 @@ class Model():
                 tf.nn.sampled_softmax_loss(local_w_t, local_b, local_inputs, labels,
                                    512, self.num_symbol),tf.float32)
         softmax_loss_function = sampled_loss
-        
         # decoder attention weight
         #top_states = [tf.nn.array_ops.reshape(e, [-1, 1, self.result_cell.output_size]) for e in tf.unpack(enc_out,axis=1)]
         #attention_states = tf.nn.array_ops.concat(1, top_states)
         enc_state = self.m_prev
-        decode_input = tf.unpack(self.input_net['a'],axis=1)
+        decode_input = tf.unpack(self.input_net['a'], axis=1)
         #self.decoder_cell = tf.nn.rnn_cell.OutputProjectionWrapper(self.decoder_cell,self.num_symbol)
         # reconstruct vae
         with tf.variable_scope('decoder'):
-            self.answer_out, _ = seq2seq.embedding_rnn_decoder(
+            self.answer_out, _ = tf.nn.seq2seq.embedding_rnn_decoder(
                     decode_input[:-1],
                     vae_decoder,
                     #attention_states,
                     self.decoder_cell,
-                    self.decoder_W,
+                    #None,
                     self.num_symbol,
                     self.embedding_size,
+                    #query = last_q,
                     output_projection=self.output_projection,
                     feed_previous=False)
         # reconstruct testing loss
-        with tf.variable_scope('decoder',reuse = True):
-            self.answer_test_out, _ = seq2seq.embedding_rnn_decoder(
+        with tf.variable_scope('decoder',reuse=True):
+            self.answer_test_out, _ = tf.nn.seq2seq.embedding_rnn_decoder(
                     decode_input[:-1],
                     vae_decoder,
                     #attention_states,
                     self.decoder_cell,
-                    self.decoder_W,
+                    #None,
                     self.num_symbol,
                     self.embedding_size,
                     output_projection=self.output_projection,
                     feed_previous=True)
         # DMN decoder training
         with tf.variable_scope('decoder',reuse=True):
-            self.a_out, _ = seq2seq.embedding_rnn_decoder(
+            self.a_out, _ = tf.nn.seq2seq.embedding_rnn_decoder(
                     decode_input[:-1],
                     enc_state,
                     #attention_states,
                     self.decoder_cell,
-                    self.decoder_W,
+                    #None,
                     self.num_symbol,
                     self.embedding_size,
                     output_projection=self.output_projection,
@@ -260,20 +271,20 @@ class Model():
         #self.a_out = [tf.stop_gradient(iteration) for iteration in self.a_out]
         # DMN decoder testing
         with tf.variable_scope('decoder',reuse=True):
-            self.a_predict, _ = seq2seq.embedding_rnn_decoder(
+            self.a_predict, _ = tf.nn.seq2seq.embedding_rnn_decoder(
                     decode_input[:-1],
                     enc_state,
                     #attention_states,
                     self.decoder_cell,
-                    self.decoder_W,
+                    #None,
                     self.num_symbol,
                     self.embedding_size,
                     output_projection=self.output_projection,
                     feed_previous=True)
         # loss function
         # remove GO length
-        a_mask = tf.sequence_mask(self.input_net['a_mask']-1 , self.a_max_length -1 , dtype=tf.float32)
-        a_mask = tf.unpack(a_mask,axis=1)
+        a_mask = tf.sequence_mask(self.input_net['a_mask']-1, self.a_max_length-1, dtype=tf.float32)
+        a_mask = tf.unpack(a_mask, axis=1)
         self.output_net['vae_loss'] = tf.nn.seq2seq.sequence_loss_by_example(
                                         self.answer_out,
                                         decode_input[1:],
@@ -295,16 +306,17 @@ class Model():
 
         # To word
         #self.a_out = self.transform(self.a_out,self.output_projection)
-        self.a_predict = self.transform(self.a_predict,self.output_projection)
+        self.a_predict = self.transform(self.a_predict, self.output_projection)
         #self.a_train = [ tf.argmax(word,1) for word in self.a_out ]
         self.predict = [ tf.argmax(word,1) for word in self.a_predict ]
         
         # Update
         #self.opti = tf.train.GradientDescentOptimizer(0.01)#.minimize(self.output_net['loss'])
         self.opti = tf.train.AdamOptimizer(0.001)
-        self.vae_update = self.opti.minimize(self.output_net['vae_loss'] + 0.001 * self.l2_loss1 + self.kl_obj)
-        self.l2_loss2 += tf.nn.l2_loss(w1)+ tf.nn.l2_loss(w2)
-        self.update = tf.train.AdamOptimizer(0.001).minimize(self.output_net['loss'] + 0.001 * self.l2_loss2)
+        self.vae_update = self.opti.minimize(self.output_net['vae_loss']  + self.kl_obj + 0.001 * self.l2_loss1)
+        self.l2_loss2 += tf.nn.l2_loss(w1) + tf.nn.l2_loss(w2)
+        #self.l2_loss2 += tf.nn.l2_loss(self.decoder_W)
+        self.update = tf.train.MomentumOptimizer(0.01,momentum=0.90).minimize(self.output_net['loss'] + 0.001 * self.l2_loss2)
         #self.opti = tf.train.AdamOptimizer(0.01)
         #grads_and_vars = self.opti.compute_gradients(self.output_net['loss'] + 0.001*l2_loss)
         #capped_grads_and_vars = [ (tf.clip_by_value(gv[0], -0.1, 0.1), gv[1]) for gv in grads_and_vars ]
@@ -312,5 +324,17 @@ class Model():
 
         init = tf.global_variables_initializer()#
         self.sess.run(init)
-    def transform(self,inputs,output_projection):#,outputs):
-        return [tf.matmul(input,output_projection[0])+output_projection[1] for input in inputs]
+    def transform(self, inputs, output_projection):#,outputs):
+        ''' A helper for sequence to sequence model.
+            Transform RNNs output(shape: RNNs size) to vocabulary size.
+            
+            Args: 
+              inputs: a sequence-length list of 2D Tensors 
+              output_projection: the same argument as the one in embedding_rnn_decoder
+            Returns:
+              a sequence-length list of 1D int32 Tensors
+        '''
+        if output_projection is not None:
+            return [tf.matmul(input,output_projection[0])+output_projection[1] for input in inputs]
+        else:
+            return inputs
