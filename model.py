@@ -69,8 +69,8 @@ class Model():
         b1 = tf.get_variable("b1",[1,inner],initializer=tf.contrib.layers.xavier_initializer())
         w2 = tf.get_variable("w2",[inner,1],initializer=tf.contrib.layers.xavier_initializer())
         b2 = tf.get_variable("b2",[1,1],initializer=tf.contrib.layers.xavier_initializer())
-        w3 = tf.get_variable("w3",[inner,2],initializer=tf.contrib.layers.xavier_initializer())
-        b3 = tf.get_variable("b3",[2],initializer=tf.contrib.layers.xavier_initializer())
+        classifer_w = tf.get_variable("classifer_w",[inner,2],initializer=tf.contrib.layers.xavier_initializer())
+        classifer_b = tf.get_variable("classifer_b",[2],initializer=tf.contrib.layers.xavier_initializer())
         #w4 = tf.get_variable("w4",[32,self.num_class],initializer=tf.contrib.layers.xavier_initializer())
         #b4 = tf.get_variable("b4",[self.num_class],initializer=tf.contrib.layers.xavier_initializer())
         #document
@@ -146,7 +146,7 @@ class Model():
                     initial_state= self.m_prev)
         
         input_feature = output[:,0,:]#tf.concat(1, [reader_out, last_q] )
-        self.predict = tf.matmul(input_feature,w3) + b3#),w4 )+ b4 
+        self.predict = tf.matmul(input_feature,classifer_w) + classifer_b#),w4 )+ b4 
         self.output_net['loss'] = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits = self.predict,
                                                                                 labels = self.input_net['labels']) )
                                                                                         #pos_weight=5))
@@ -159,7 +159,7 @@ class Model():
         #self.acc = tf.reduce_sum(tf.cast(tf.equal(self.predict,actual),tf.float32))
         # Update
         #self.opti = tf.train.GradientDescentOptimizer(0.01)#.minimize(self.output_net['loss'])
-        l2_loss = tf.nn.l2_loss(w1)+ tf.nn.l2_loss(w2) + tf.nn.l2_loss(self.W) + tf.nn.l2_loss(w3)# + tf.nn.l2_loss(w4)
+        l2_loss = tf.nn.l2_loss(w1)+ tf.nn.l2_loss(w2) + tf.nn.l2_loss(self.W) + tf.nn.l2_loss(classifer_w)# + tf.nn.l2_loss(w4)
         self.update = tf.train.MomentumOptimizer(0.01,momentum=0.90).minimize(self.output_net['loss']+0.0002*l2_loss)
         #grads_and_vars = self.opti.compute_gradients(self.output_net['loss']+0.0005*l2_loss)
         #capped_grads_and_vars = [ (tf.clip_by_value(gv[0], -0.1, 0.1), gv[1]) for gv in grads_and_vars ]

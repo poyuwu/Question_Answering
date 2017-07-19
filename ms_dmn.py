@@ -47,8 +47,9 @@ id_mapping = {"PAD_ID": 0,"EOS_ID":1,"UNK_ID":2,"GO":3,"1":4,"0":5}
 id2word = ["PAD_ID","EOS_ID","UNK_ID","GO","1","0"]
 # replace all integer(1,2,30,1000,...) to tag2number
 if args.replace == 1:
+    tag2number = len(id2word)
     id2word.append("tag2number")
-    id_mapping.update({"tag2number": len(id2word)})
+    id_mapping.update({"tag2number": tag2number})
 mapping = {"description":0,"numeric":1,"entity":2,"location":3,"person":4}
 count = len(id2word)
 #read data
@@ -74,7 +75,7 @@ with open('train_v1.1.json') as f:
             # processing with digit
             if token.isdigit():
                 if args.replace == 1:
-                    ans_temp.append(6)
+                    ans_temp.append(tag2number)
                     continue
                 elif args.replace == 2:
                     if token in number_dict:
@@ -106,7 +107,7 @@ with open('train_v1.1.json') as f:
                         token = token.lower()
                         if token.isdigit():
                             if args.replace == 1:
-                                temp.append(6)
+                                temp.append(tag2number)
                                 continue
                             elif args.replace == 2:
                                 if token in number_dict:
@@ -138,7 +139,7 @@ with open('train_v1.1.json') as f:
                 continue
             if token.isdigit():
                 if args.replace == 1:
-                    temp.append(6)
+                    temp.append(tag2number)
                     continue
                 elif args.replace == 2:
                     if token in number_dict:
@@ -192,7 +193,7 @@ with open('dev_v1.1.json') as f:
                 continue
             if token.isdigit():
                 if args.replace == 1:
-                    ans_temp.append(6)
+                    ans_temp.append(tag2number)
                     continue
                 elif args.replace == 2:
                     if token in number_dict:
@@ -226,7 +227,7 @@ with open('dev_v1.1.json') as f:
                         token = token.lower()
                         if token.isdigit():
                             if args.replace == 1:
-                                temp.append(6)
+                                temp.append(tag2number)
                                 continue
                             elif args.replace == 2:
                                 if token in number_dict:
@@ -259,7 +260,7 @@ with open('dev_v1.1.json') as f:
                 continue
             if token.isdigit():
                 if args.replace == 1:
-                    temp.append(6)
+                    temp.append(tag2number)
                     continue
                 elif args.replace == 2:
                     if token in number_dict:
