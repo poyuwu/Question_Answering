@@ -2,24 +2,36 @@
 import json
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL']='3'
-import model2 as classifer
+import model as classifer
 import numpy as np
 import sys
+import gc
+gc.enable()
 #from glob import glob
 #from pythonrouge import pythonrouge
 import argparse
 parser = argparse.ArgumentParser()
-parser.add_argument('--rnn_size',type=int,default=256,help='cell size')
+parser.add_argument('--rnn_size',type=int,default=512,help='cell size')
 parser.add_argument('--embedding_size',type=int,default=500,help='embedding')
 parser.add_argument('--replace',type=int,default=2,help='replace digit')
 parser.add_argument('--device',type=str,default="1",help='GPU device')
 parser.add_argument('--batch_size',type=int,default=16,help='batch size')
+parser.add_argument('--encode_type',type=str,default="cnn",help='encode document type')
 args = parser.parse_args()
 print args
 os.environ["CUDA_VISIBLE_DEVICES"] = args.device
 #ROUGE = "/home/poyuwu/github/ROUGE/ROUGE-1.5.5.pl" #ROUGE-1.5.5.pl
 #data_path = "/home/poyuwu/github/ROUGE/data" #data folder in RELEASE-1.5.5
 from nltk import word_tokenize, sent_tokenize
+def ListtoString(l1):
+    res = ""
+    for i in l1:
+        if i == id_mapping["EOS_ID"]:
+            break
+        elif i == id_mapping["PAD_ID"] or i == id_mapping["GO"]:
+            continue
+        res += id2word[i] + " "
+    return res[:-1]
 #import nltk
 import re
 #import string
@@ -50,6 +62,7 @@ if args.replace == 1:
     id2word.append("tag2number")
     id_mapping.update({"tag2number": tag2number})
 mapping = {"description": 0,"numeric": 1,"entity": 2,"location": 3,"person": 4}
+query_type = ["description","numeric","entity","location","person"]
 count = len(id2word)
 #read data
 train_facts, train_question, train_answer = [], [], []
@@ -66,6 +79,7 @@ with open('train_v1.1.json') as f:
     for line in f:
         number_dict = {}
         line = json.loads(line)
+        '''
         if len(line['answers']) == 0:#No answer
             continue
         #answer
@@ -94,6 +108,7 @@ with open('train_v1.1.json') as f:
         ans_temp.append(1)
         if len(ans_temp) > a_max_len:
             continue
+        '''
         #question
         q_temp = []
         for token in word_tokenize(remove_urls(line['query'].lower())):
@@ -293,8 +308,12 @@ with open('dev_v1.1.json') as f:
                 dev_class.append([0,1])
             else:
                 dev_class.append([1,0])
+        dev_id.append(line['query_id'])
+        dev_type.append(line['query_type'])
         end = len(dev_d)
-        dev_group.append([head,end])
+        dev_group.append([head,end-1])
+        number_dict.clear()
+        del number_dict
         #document
         #d_max_len = max(map(len,temp_facts)+[d_max_len])
         #dev_facts.append(list(pad_array(temp_facts,d_max_len))+[[0]*d_max_len]*(d_max_sent-len(temp_facts)))
@@ -311,7 +330,7 @@ with open('dev_v1.1.json') as f:
 #        q_max_len = max(q_max_len,len(q_temp))
         #ans
 #        dev_a_length.append(len(ans_temp))
-#        dev_answer.append(ans_temp)
+        dev_answer.append(ans_temp)
 dev_d = np.array(dev_d)
 dev_q = pad_array(dev_q,q_max_len)
 dev_q_len = np.array(dev_q_len)
@@ -322,7 +341,7 @@ dev_class = np.array(dev_class)
 del train_d_length, train_q_length ,train_a_length,train_d_sent_len
 del dev_d_length,dev_q_length,dev_a_length,dev_d_sent_len
 del train_facts, train_question, train_answer
-del dev_facts, dev_question, dev_answer
+del dev_facts, dev_question
 '''
 train_facts = np.array(train_facts)
 train_question = pad_array(train_question,q_max_len)
@@ -347,14 +366,15 @@ batch_size = args.batch_size
 index_list = np.array(range(len(train_d)))
 nb_batch = len(index_list)/batch_size
 
-model = classifer.Model(d_max_length=d_max_len,q_max_length=q_max_len,a_max_length=a_max_len,num_symbol=num_symbol,rnn_size=rnn_size,layer=layer,embedding_size=embedding_size,d_max_sent=d_max_sent)
+model = classifer.Model(d_max_length=d_max_len,q_max_length=q_max_len,a_max_length=a_max_len,num_symbol=num_symbol,rnn_size=rnn_size,layer=layer,embedding_size=embedding_size,d_max_sent=d_max_sent,encode_type=args.encode_type)
 model.build_model()
 print d_max_len,q_max_len,a_max_len,num_symbol,rnn_size,layer,embedding_size,d_max_sent
-print 'training QA generator'
+print 'training QA discriminator'
 #nb_batch = len(index_list)/batch_size
 for epoch in range(150):
     avg = 0.
     np.random.shuffle(index_list)
+    batch_size = args.batch_size
     ### train on msmarco
     tp, tn, fp, fn = 0., 0., 0., 0.
     for num in range(nb_batch):
@@ -368,7 +388,7 @@ for epoch in range(150):
                     model.input_net['q']:train_q[index_list[num*batch_size:num*batch_size+batch_size]],
                     model.input_net['q_mask']:train_q_len[index_list[num*batch_size:num*batch_size+batch_size]],
                     model.input_net['labels']:train_class[index_list[num*batch_size:num*batch_size+batch_size]],
-                    model.input_net['drop']:0.6})
+                    model.input_net['drop']:0.5})
         avg += cost
         tp += tmp1
         tn += tmp2
@@ -387,28 +407,48 @@ for epoch in range(150):
     print 'fmeasure', fmeasure
     ###test on msmarco
     loss, tp, tn, fp, fn = 0., 0., 0., 0., 0.
-    for i in range(len(dev_d)/batch_size +1):
-        start = i*batch_size
-        end = i*batch_size + batch_size
-        if i == len(dev_d)/batch_size:
-            end = len(dev_d)
-        cost, tmp1, tmp2, tmp3, tmp4 = model.sess.run([model.output_net['loss'],model.tp,model.tn,model.fp,model.fn],
+    batch_size = 60
+    f_out = open('/home_local/poyuwu/QA/result/dev_'+str(epoch) + '.json','w')
+    for i in range(len(dev_group)/batch_size):
+        start = i*batch_size#dev_group[i*batch_size]
+        if i == len(dev_group)/batch_size -1:
+            end = len(dev_group) - 1 
+        else:
+            end = i*batch_size+batch_size - 1
+        #start = i*batch_size
+        #end = i*batch_size + batch_size
+        #if i == len(dev_d)/batch_size:
+        #    end = len(dev_d)
+        prob, tmp1, tmp2, tmp3, tmp4 = model.sess.run([model.prob[:,1],model.tp,model.tn,model.fp,model.fn],
                     feed_dict={
-                        model.input_net['d']:dev_d[start:end],
-                        model.input_net['d_mask']:dev_d_sent[start:end],#dev_d_length[start:end],
-                        model.input_net['d_sent_mask']:dev_d_len[start:end],
-                        model.input_net['q']:dev_q[start:end],
-                        model.input_net['q_mask']:dev_q_len[start:end],
-                        model.input_net['labels']:dev_class[start:end],
+                        model.input_net['d']:dev_d[dev_group[start][0]:dev_group[end][1]+1],
+                        model.input_net['d_mask']:dev_d_sent[dev_group[start][0]:dev_group[end][1]+1],#dev_d_length[start:end],
+                        model.input_net['d_sent_mask']:dev_d_len[dev_group[start][0]:dev_group[end][1]+1],
+                        model.input_net['q']:dev_q[dev_group[start][0]:dev_group[end][1]+1],
+                        model.input_net['q_mask']:dev_q_len[dev_group[start][0]:dev_group[end][1]+1],
+                        model.input_net['labels']:dev_class[dev_group[start][0]:dev_group[end][1]+1],
                     model.input_net['drop']:1})
-        loss += cost * batch_size
+        for j in range(end-start):
+            out_dict = {}
+            out_dict.update({"query_id": dev_id[start+j]})
+            out_dict.update({"query_type": dev_type[start+j]})
+            out_dict.update({"query": ListtoString(dev_q[dev_group[start+j][0]])})
+            out_dict.update({"answers": [ListtoString(dev_answer[start+j]) ]})
+            max_index = np.argmax(prob[dev_group[start+j][0]-dev_group[start][0]:dev_group[start+j][1]-dev_group[start][0]])
+            #passage_text = [ListtoString(passages) for passages in dev_d[start+max_index] if not passages[0] == 0]
+            out_dict.update({"passages": [{"is_selected": 1 , "passages_text" : ListtoString(passages)} for passages in dev_d[dev_group[start+j][0]+max_index] if not passages[0] == 0] })
+            json.dump(out_dict, f_out)
+            f_out.write("\n")
+            out_dict.clear()
+            del out_dict
+        #loss += cost * batch_size
         tp += tmp1
         tn += tmp2
         fp += tmp3
         fn += tmp4
-        sys.stdout.write(str(epoch)+"\t ms loss:"+str(np.mean(cost))+"\r")
+        #sys.stdout.write(str(epoch)+"\t ms loss:"+str(np.mean(cost))+"\r")
         sys.stdout.flush()
-    sys.stdout.write(str(epoch)+"\t ms loss:"+str(loss/len(dev_d))+"\n")
+    #sys.stdout.write(str(epoch)+"\t ms loss:"+str(loss/len(dev_d))+"\n")
     accuracy = (tp + tn) / (tp + fp + fn + tn)
     precision = tp / (tp + fp + 1e-10)
     recall = tp / (tp + fn)
@@ -417,3 +457,4 @@ for epoch in range(150):
     print 'precision: ', precision
     print 'recall: ', recall
     print 'fmeasure', fmeasure
+    f_out.close()

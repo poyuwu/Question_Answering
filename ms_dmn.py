@@ -1,21 +1,32 @@
 # coding=utf-8
 import json
 import os
-os.environ['TF_CPP_MIN_LOG_LEVEL']='3'
-import finaldmn as qaseq
-import numpy as np
-import sys
-#from glob import glob
-#from pythonrouge import pythonrouge
 import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument('--rnn_size',type=int,default=256,help='cell size')
 parser.add_argument('--embedding_size',type=int,default=500,help='embedding')
-parser.add_argument('--replace',type=int,default=1,help='replace digit')
+parser.add_argument('--replace',type=int,default=0,help='replace digit')
 parser.add_argument('--device',type=str,default="1",help='GPU device')
 parser.add_argument('--batch_size',type=int,default=16,help='batch size')
+parser.add_argument('--hop',type=int,default=3,help='hop')
+parser.add_argument('--fine_tune',action='store_true')
+parser.add_argument('--vrae',action='store_true')
+parser.add_argument('--save_weight',action='store_true')
+parser.add_argument('--model',type=int,default=1,help="model type")
+parser.add_argument('--dev',type=str,default="dev_v1.1.json",help="model type")
 args = parser.parse_args()
 print args
+os.environ['TF_CPP_MIN_LOG_LEVEL']='3'
+if args.model == 1:
+    import finaldmn as qaseq
+elif args.model == 2:
+    import dqseq as qaseq
+elif args.model == 3:
+    import dandq as qaseq
+import numpy as np
+import sys
+#from glob import glob
+#from pythonrouge import pythonrouge
 os.environ["CUDA_VISIBLE_DEVICES"] = args.device
 #ROUGE = "/home/poyuwu/github/ROUGE/ROUGE-1.5.5.pl" #ROUGE-1.5.5.pl
 #data_path = "/home/poyuwu/github/ROUGE/data" #data folder in RELEASE-1.5.5
@@ -43,6 +54,15 @@ def pad_array(arr,seq_len=None): #2D
                 if j < len(arr[i]):
                     output[i][j] = arr[i][j]
         return output.astype(int)
+def ListtoString(l1):
+    res = ""
+    for i in l1:
+        if i == id_mapping["EOS_ID"]:
+            break
+        elif i == id_mapping["PAD_ID"] or i == id_mapping["GO"]:
+            continue
+        res += id2word[i] + " "
+    return res[:-1]
 id_mapping = {"PAD_ID": 0,"EOS_ID":1,"UNK_ID":2,"GO":3,"1":4,"0":5}
 id2word = ["PAD_ID","EOS_ID","UNK_ID","GO","1","0"]
 # replace all integer(1,2,30,1000,...) to tag2number
@@ -179,7 +199,7 @@ with open('train_v1.1.json') as f:
 #dev_facts, dev_question, dev_answer = [], [], []
 dev_d_length,dev_q_length ,dev_a_length,dev_d_sent_len = [],[],[],[]
 dev_id, dev_type = [], []
-with open('dev_v1.1.json') as f:
+with open(args.dev) as f:#dev_v1.1.json
     for line in f:
         number_dict = {}
         line = json.loads(line)
@@ -315,39 +335,49 @@ dev_q_length = np.array(dev_q_length)
 dev_a_length = np.array(dev_a_length)
 dev_d_sent_len = np.array(dev_d_sent_len)
 
+# write reference file
+reference = open('/home_local/poyuwu/QA/result/'+ args.device +'/ref.json','w')
+for i in range(len(dev_id)):
+    out_dict = {"query_id": dev_id[i], "query_type": dev_type[i], "query": ListtoString(dev_question[i]),"answers":[ListtoString(dev_answer[i])]}
+    json.dump(out_dict,reference)
+    out_dict.clear()
+    del out_dict
+    reference.write("\n")
+reference.close()
 num_symbol = len(id2word)
 rnn_size = args.rnn_size
 layer = 1
 embedding_size = args.embedding_size
 index_list = np.array(range(len(train_answer)))
-model = qaseq.Model(d_max_length=d_max_len,q_max_length=q_max_len,a_max_length=a_max_len,num_symbol=num_symbol,rnn_size=rnn_size,layer=layer,embedding_size=embedding_size,d_max_sent=d_max_sent)
+model = qaseq.Model(d_max_length=d_max_len,q_max_length=q_max_len,a_max_length=a_max_len,num_symbol=num_symbol,rnn_size=rnn_size,layer=layer,embedding_size=embedding_size,d_max_sent=d_max_sent,hop = args.hop, fine_tune=args.fine_tune,vrae=args.vrae)
 model.build_model()
 print d_max_len,q_max_len,a_max_len,num_symbol,rnn_size,layer,embedding_size,d_max_sent
 batch_size = args.batch_size
 nb_batch = len(index_list)/batch_size
-print 'train vrae'
-for epoch in range(5):
-    avg = 0.
-    np.random.shuffle(index_list)
-    # variantional recurrent autoencoder
-    batch_size = args.batch_size
-    for num in range(nb_batch):
-        opti = model.vae_update 
-        loss = model.output_net['vae_loss']
-        _, cost = model.sess.run([opti,loss],
-                feed_dict={
-                    model.input_net['d']:train_facts[index_list[num*batch_size:num*batch_size+batch_size]],
-                    model.input_net['d_mask']:train_d_sent_len[index_list[num*batch_size:num*batch_size+batch_size]],
-                    model.input_net['d_sent_mask']:train_d_length[index_list[num*batch_size:num*batch_size+batch_size]],
-                    model.input_net['q']:train_question[index_list[num*batch_size:num*batch_size+batch_size]],
-                    model.input_net['q_mask']:train_q_length[index_list[num*batch_size:num*batch_size+batch_size]],
-                    model.input_net['a']:train_answer[index_list[num*batch_size:num*batch_size+batch_size]],
-                    model.input_net['a_mask']:train_a_length[index_list[num*batch_size:num*batch_size+batch_size]],
-                    model.input_net['drop']:0.5})
-        avg += cost
-        sys.stdout.write(str(epoch)+"\t traininig loss "+str(avg/(num+1))+"\r")
-        sys.stdout.flush()
-    sys.stdout.write(str(epoch)+"\t traininig loss "+str(avg/nb_batch)+"\t"+"\n")
+if args.vrae:
+    print 'train vrae'
+    for epoch in range(3):
+        avg = 0.
+        np.random.shuffle(index_list)
+        # variantional recurrent autoencoder
+        batch_size = 32#args.batch_size
+        for num in range(nb_batch):
+            opti = model.vae_update 
+            loss = model.output_net['vae_loss']
+            _, cost = model.sess.run([opti,loss],
+                    feed_dict={
+                        model.input_net['d']:train_facts[index_list[num*batch_size:num*batch_size+batch_size]],
+                        model.input_net['d_mask']:train_d_sent_len[index_list[num*batch_size:num*batch_size+batch_size]],
+                        model.input_net['d_sent_mask']:train_d_length[index_list[num*batch_size:num*batch_size+batch_size]],
+                        model.input_net['q']:train_question[index_list[num*batch_size:num*batch_size+batch_size]],
+                        model.input_net['q_mask']:train_q_length[index_list[num*batch_size:num*batch_size+batch_size]],
+                        model.input_net['a']:train_answer[index_list[num*batch_size:num*batch_size+batch_size]],
+                        model.input_net['a_mask']:train_a_length[index_list[num*batch_size:num*batch_size+batch_size]],
+                        model.input_net['drop']:0.5})
+            avg += cost
+            sys.stdout.write(str(epoch)+"\t traininig loss "+str(avg/(num+1))+"\r")
+            sys.stdout.flush()
+        sys.stdout.write(str(epoch)+"\t traininig loss "+str(avg/nb_batch)+"\t"+"\n")
 print 'DMN training'
 for epoch in range(150):
     avg = 0.
@@ -374,16 +404,16 @@ for epoch in range(150):
     ###test on msmarco
     loss = 0.
     candidate = open('/home_local/poyuwu/QA/result/'+ args.device+'/cand_'+str(epoch)+".json",'w')
-    if epoch == 0:
-        reference = open('/home_local/poyuwu/QA/result/'+ args.device +'/ref_'+str(epoch)+".json",'w')
-    #f_attn = open('/home_local/poyuwu/QA/result/'+args.device+'/weight'+str(epoch),'ab')
+    if args.save_weight:
+        f_attn = open('/home_local/poyuwu/QA/result/'+args.device+'/weight'+str(epoch),'ab')
     batch_size = 128
     for i in range(len(dev_facts)/batch_size +1):
         start = i*batch_size
         end = i*batch_size + batch_size
         if i == len(dev_facts)/batch_size:
             end = len(dev_facts)
-        cost, predict = model.sess.run([model.output_net['test_loss'], model.predict],
+        if args.save_weight:
+            cost, predict, weight = model.sess.run([model.output_net['test_loss'], model.predict, model.attention_weight],
                     feed_dict={
                         model.input_net['d']:dev_facts[start:end],
                         model.input_net['d_mask']:dev_d_sent_len[start:end],#dev_d_length[start:end],
@@ -393,19 +423,23 @@ for epoch in range(150):
                         model.input_net['a']:dev_answer[start:end],
                         model.input_net['a_mask']:dev_a_length[start:end],
                         model.input_net['drop']:1})
-        #np.savetxt(f_attn,weight.reshape(end-start,2*d_max_sent))
+            np.savetxt(f_attn, weight.reshape(end-start,3*d_max_sent))
+        else:
+            cost, predict= model.sess.run([model.output_net['test_loss'], model.predict],
+                    feed_dict={
+                        model.input_net['d']:dev_facts[start:end],
+                        model.input_net['d_mask']:dev_d_sent_len[start:end],#dev_d_length[start:end],
+                        model.input_net['d_sent_mask']:dev_d_length[start:end],
+                        model.input_net['q']:dev_question[start:end],
+                        model.input_net['q_mask']:dev_q_length[start:end],
+                        model.input_net['a']:dev_answer[start:end],
+                        model.input_net['a_mask']:dev_a_length[start:end],
+                        model.input_net['drop']:1})
         loss += cost * batch_size
         #sys.stdout.write(str(epoch)+"\t ms loss:"+str(np.mean(cost))+"\r")
         #sys.stdout.flush()
         for j in range(end-start):
             candidate.write('{"query_id": '+str(dev_id[start+j]) +',"query_type":'+str(dev_type[start+j])+', "answers": ["')
-            if epoch == 0:
-                reference.write('{"query_id": '+str(dev_id[start+j])+',"query_type":'+str(dev_type[start+j])+ ', "query": "')
-                for word in dev_question[start:end][j]:
-                    if word == 0:
-                        break
-                    reference.write(id2word[word].encode('utf8')+' ')
-                reference.write('" ,"answers": ["')
             for k in range(a_max_len-1):
                 word = predict[k][j]
                 if word == 1:
@@ -415,18 +449,10 @@ for epoch in range(150):
             #f_out.write('\n')
             #f_out.write("acc: ")
             candidate.write('"]}\n')
-            if epoch!=0:
-                continue
-            for word in dev_answer[start:end][j]:
-                if word == 3:
-                    continue
-                if word == 1:
-                    break
-                reference.write(id2word[word].encode('utf8')+" ")
-            reference.write('"]}\n')
                 #f_out.write(id2word[word].encode('utf8')+" ")
             #f_out.write('\n')
-    reference.close()
     candidate.close()
     sys.stdout.write(str(epoch)+"\t ms loss:"+str(loss/len(dev_facts))+"\n")
+    if args.save_weight:
+        f_attn.close()
     #print "lr:",model.sess.run(model.learning_rate_decay_op)

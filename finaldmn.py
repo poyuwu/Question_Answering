@@ -44,13 +44,14 @@ def softmax(inputs,mask):
     sigma = tf.reduce_sum(inputs,axis=1,keep_dims=True)
     return inputs/(sigma+1e-12) 
 class Model():
-    def __init__(self,d_max_length=100,q_max_length=27,a_max_length=27,rnn_size=64,embedding_size=300,num_symbol=10000,layer=2,d_max_sent=29):
+    def __init__(self,d_max_length=100,q_max_length=27,a_max_length=27,rnn_size=64,embedding_size=300,num_symbol=10000,layer=2,d_max_sent=29,hop=3,fine_tune=True,vrae=False):
         tf.reset_default_graph()
         self.d_max_sent = d_max_sent
         self.d_max_length = d_max_length
         self.q_max_length = q_max_length
         self.a_max_length = a_max_length
         self.rnn_size = rnn_size
+        self.hop = hop
         self.input_net = {}
         self.output_net = {}
         self.input_net['drop'] = tf.placeholder(tf.float32,[])
@@ -70,6 +71,8 @@ class Model():
         self.sess = tf.Session()
         self.l2_loss1 = tf.constant(0.0)
         self.l2_loss2 = tf.constant(0.0)
+        self.fine_tune = fine_tune
+        self.vrae = vrae
     def positional_encoding(self,D,M):
         encoding = np.zeros([D, M])
         for j in range(M):
@@ -102,12 +105,12 @@ class Model():
         #self.l2_loss1 += tf.nn.l2_loss(self.decoder_W)
         #self.l2_loss2 += tf.nn.l2_loss(self.decoder_W)
         inner = self.rnn_size
-        w1 = tf.get_variable("w1",[self.rnn_size*4,inner],initializer=tf.contrib.layers.xavier_initializer())
-        b1 = tf.get_variable("b1",[1,inner],initializer=tf.contrib.layers.xavier_initializer())
-        w2 = tf.get_variable("w2",[inner,1],initializer=tf.contrib.layers.xavier_initializer())
-        b2 = tf.get_variable("b2",[1,1],initializer=tf.contrib.layers.xavier_initializer())
-        mem_update = tf.get_variable("mem_update",[self.rnn_size*3, self.rnn_size], initializer=tf.contrib.layers.xavier_initializer())
-        bias = tf.get_variable("bias",[self.rnn_size], initializer=tf.contrib.layers.xavier_initializer())
+        w1 = tf.get_variable("w1",[self.rnn_size*4,inner])#,initializer=tf.contrib.layers.xavier_initializer())
+        b1 = tf.get_variable("b1",[1,inner])#,initializer=tf.contrib.layers.xavier_initializer())
+        w2 = tf.get_variable("w2",[inner,1])#,initializer=tf.contrib.layers.xavier_initializer())
+        b2 = tf.get_variable("b2",[1,1])#,initializer=tf.contrib.layers.xavier_initializer())
+        mem_update = tf.get_variable("mem_update",[self.rnn_size*3, self.rnn_size])#, initializer=tf.contrib.layers.xavier_initializer())
+        bias = tf.get_variable("bias",[self.rnn_size])#, initializer=tf.contrib.layers.xavier_initializer())
         # create variantional recurrent autoencoder 
         a_embed = tf.nn.embedding_lookup(self.encoder_W,self.input_net['a'][:,1:])
         _, a_enc_state = tf.nn.dynamic_rnn(
@@ -125,7 +128,7 @@ class Model():
             # sample latent space
             z, self.kl_obj, self.kl_cost = sample(self.mu_enc, self.sig_enc, self.latent_dim, kl_min=4)
         with tf.variable_scope('latent_to_decoder'):
-            W_z = tf.get_variable("W_z",[self.latent_dim,self.rnn_size],initializer=tf.contrib.layers.xavier_initializer())
+            W_z = tf.get_variable("W_z",[self.latent_dim,self.rnn_size])#,initializer=tf.contrib.layers.xavier_initializer())
             bias_z = tf.get_variable("bias_z",[self.rnn_size],initializer=tf.zeros_initializer)
             self.l2_loss1 += tf.nn.l2_loss(W_z)
             vae_decoder = prelu(tf.matmul(z,W_z)+bias_z)
@@ -179,27 +182,30 @@ class Model():
         #reader_out = tf.concat_v2(temp,2)
         
         self.m_prev = last_q
-        for hop in range(1):
+        self.attention_weight = []
+        for hop in range(self.hop):
             # get content by attention
-            self.attention_weight = []
+            attention_weight = []
             for i in range(self.d_max_sent):
                 vec1 = reader_out[:,i] * last_q
                 vec2 = tf.abs(reader_out[:,i] - last_q)
                 vec3 = reader_out[:,i] * self.m_prev
                 vec4 = tf.abs(reader_out[:,i] - self.m_prev)
                 vec = tf.concat(1,[vec1, vec2, vec3, vec4])
-                self.attention_weight.append(tf.matmul(tf.tanh(tf.matmul(vec,w1) +b1),w2)+b2)
-            self.attention_weight = tf.reshape(tf.pack(self.attention_weight,axis=1),[-1,self.d_max_sent])
-            self.attention_weight = softmax(
-                    self.attention_weight,
+                attention_weight.append(tf.matmul(tf.tanh(tf.matmul(vec,w1) +b1),w2)+b2)
+            attention_weight = tf.reshape(tf.pack(attention_weight,axis=1),[-1,self.d_max_sent])
+            attention_weight = softmax(
+                    attention_weight,
                     tf.sequence_mask(self.input_net['d_sent_mask'],self.d_max_sent,dtype=tf.float32))
-            self.context_vec = tf.reduce_sum(reader_out * tf.expand_dims(self.attention_weight,axis=2),axis=1)
+            self.context_vec = tf.reduce_sum(reader_out * tf.expand_dims(attention_weight,axis=2),axis=1)
+            self.attention_weight.append(attention_weight)
             # Update Memory
             with tf.variable_scope('mem_update') as vs:
                 if hop>0: vs.reuse_variables()
                 ## 1 ReLU, untied
                 self.m_prev = tf.nn.relu(tf.matmul(tf.concat(1,[self.m_prev,self.context_vec,last_q]),mem_update)+bias)
                 ## 2 tied model
+        self.attention_weight = tf.pack(self.attention_weight,axis=1)
             #    _, self.m_prev = tf.nn.dynamic_rnn(
             #        self.result_cell,
             #        tf.expand_dims(self.context_vec,axis=1),
@@ -268,7 +274,9 @@ class Model():
                     self.embedding_size,
                     output_projection=self.output_projection,
                     feed_previous=False)
-        #self.a_out = [tf.stop_gradient(iteration) for iteration in self.a_out]
+        if self.vrae:
+            if not self.fine_tune:
+                self.a_out = [tf.stop_gradient(iteration) for iteration in self.a_out]
         # DMN decoder testing
         with tf.variable_scope('decoder',reuse=True):
             self.a_predict, _ = tf.nn.seq2seq.embedding_rnn_decoder(
@@ -313,7 +321,7 @@ class Model():
         # Update
         #self.opti = tf.train.GradientDescentOptimizer(0.01)#.minimize(self.output_net['loss'])
         self.opti = tf.train.AdamOptimizer(0.001)
-        self.vae_update = self.opti.minimize(self.output_net['vae_loss']  + self.kl_obj + 0.001 * self.l2_loss1)
+        self.vae_update = self.opti.minimize(self.output_net['vae_loss']  + self.kl_obj) #+ 0.001 * self.l2_loss1)
         self.l2_loss2 += tf.nn.l2_loss(w1) + tf.nn.l2_loss(w2)
         #self.l2_loss2 += tf.nn.l2_loss(self.decoder_W)
         self.update = tf.train.MomentumOptimizer(0.01,momentum=0.90).minimize(self.output_net['loss'] + 0.001 * self.l2_loss2)
