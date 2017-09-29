@@ -5,7 +5,7 @@ import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument('--rnn_size',type=int,default=256,help='cell size')
 parser.add_argument('--embedding_size',type=int,default=500,help='embedding')
-parser.add_argument('--replace',type=int,default=0,help='replace digit')
+parser.add_argument('--replace',type=int,default=2,help='replace digit')
 parser.add_argument('--device',type=str,default="1",help='GPU device')
 parser.add_argument('--batch_size',type=int,default=16,help='batch size')
 parser.add_argument('--hop',type=int,default=3,help='hop')
@@ -14,9 +14,15 @@ parser.add_argument('--vrae',action='store_true')
 parser.add_argument('--save_weight',action='store_true')
 parser.add_argument('--model',type=int,default=1,help="model type")
 parser.add_argument('--dev',type=str,default="dev_v1.1.json",help="model type")
+parser.add_argument('--sentence_reader',type=str,default="PS",help="sentence_reader type")
 args = parser.parse_args()
 print args
 os.environ['TF_CPP_MIN_LOG_LEVEL']='3'
+""" Decide to what model you want to import.
+1 for Dynamic Memory Network.
+2 for baseline Model 1
+3 for baseline Model 2
+"""
 if args.model == 1:
     import finaldmn as qaseq
 elif args.model == 2:
@@ -25,17 +31,15 @@ elif args.model == 3:
     import dandq as qaseq
 import numpy as np
 import sys
-#from glob import glob
-#from pythonrouge import pythonrouge
 os.environ["CUDA_VISIBLE_DEVICES"] = args.device
-#ROUGE = "/home/poyuwu/github/ROUGE/ROUGE-1.5.5.pl" #ROUGE-1.5.5.pl
-#data_path = "/home/poyuwu/github/ROUGE/data" #data folder in RELEASE-1.5.5
 from nltk import word_tokenize,sent_tokenize
-#import nltk
 import re
-#import string
 regex = re.compile('[%s]' % re.escape(u'!"#$%&()*+,-./:;<=>?@[\\]^_`{|}~\“”©›®'))#string.prouncation
 def remove_urls(vTEXT):
+    """ Remove certain words. Ex: http/ wiki pedia title.
+    
+    Returns: Removed string
+    """
     vTEXT = re.sub(r'(https|http)?:\/\/(\w|\.|\/|\?|\=|\&|\%)*\b', 'tag2url', vTEXT, flags=re.MULTILINE)
     vTEXT = re.sub(ur'—|–|•|…|-|°', ' ', vTEXT, flags=re.MULTILINE)
     vTEXT = re.sub(ur'’|‘',"'",vTEXT)
@@ -43,7 +47,14 @@ def remove_urls(vTEXT):
     vTEXT = re.sub('From Wikipedia, the free encyclopedia\.?','',vTEXT,flags=re.IGNORECASE)
     vTEXT = re.sub('‍|‎|​|‏','',vTEXT)
     return(vTEXT)
-def pad_array(arr,seq_len=None): #2D
+def pad_sequences(arr,seq_len=None): #2D
+    """ Convert 2D list to numpy array for batching. Like pad_sequences.
+    Args:
+      arr: 2D list.
+      seq_len: if None, pad to max_len,
+               else cut off to seq_len.
+    Returns: 2D numpy array.
+    """
     if seq_len is None:
         M = max(len(a) for a in arr)
         return np.array([a + [0] * (M - len(a)) for a in arr])
@@ -63,6 +74,9 @@ def ListtoString(l1):
             continue
         res += id2word[i] + " "
     return res[:-1]
+def is_ascii(s):
+    return all(ord(c) < 128 for c in s)
+
 id_mapping = {"PAD_ID": 0,"EOS_ID":1,"UNK_ID":2,"GO":3,"1":4,"0":5}
 id2word = ["PAD_ID","EOS_ID","UNK_ID","GO","1","0"]
 # replace all integer(1,2,30,1000,...) to tag2number
@@ -92,6 +106,9 @@ with open('train_v1.1.json') as f:
             token = regex.sub(u'',token)
             if token == u'':
                 continue
+            if not is_ascii(token):
+                print "QQ", line["query_id"]
+                token = "UNK_ID"
             # processing with digit
             if token.isdigit():
                 if args.replace == 1:
@@ -125,6 +142,8 @@ with open('train_v1.1.json') as f:
                         if token == u'':
                             continue
                         token = token.lower()
+                        if not is_ascii(token):
+                            token = "UNK_ID"
                         if token.isdigit():
                             if args.replace == 1:
                                 temp.append(tag2number)
@@ -157,6 +176,8 @@ with open('train_v1.1.json') as f:
             token = regex.sub(u'',token)
             if token == u'':
                 continue
+            if not is_ascii(token):
+                token = "UNK_ID"
             if token.isdigit():
                 if args.replace == 1:
                     temp.append(tag2number)
@@ -181,7 +202,7 @@ with open('train_v1.1.json') as f:
 #            continue
         #document
         d_max_len = max(map(len,temp_facts)+[d_max_len])
-        train_facts.append(list(pad_array(temp_facts,d_max_len))+[[0]*d_max_len]*(d_max_sent-len(temp_facts)))
+        train_facts.append(list(pad_sequences(temp_facts,d_max_len))+[[0]*d_max_len]*(d_max_sent-len(temp_facts)))
         train_d_length.append(len(temp_facts))
         d_max_sent = max(d_max_sent,len(temp_facts))
         train_d_sent_len.append(map(len,temp_facts)+[0]*(d_max_sent-len(temp_facts)))
@@ -211,6 +232,8 @@ with open(args.dev) as f:#dev_v1.1.json
             token = regex.sub(u'',token)
             if token == u'':
                 continue
+            if not is_ascii(token):
+                print "QQ test"
             if token.isdigit():
                 if args.replace == 1:
                     ans_temp.append(tag2number)
@@ -245,6 +268,8 @@ with open(args.dev) as f:#dev_v1.1.json
                         if token == u'':
                             continue
                         token = token.lower()
+                        if not is_ascii(token):
+                            token = "UNK_ID"
                         if token.isdigit():
                             if args.replace == 1:
                                 temp.append(tag2number)
@@ -278,6 +303,8 @@ with open(args.dev) as f:#dev_v1.1.json
             token = regex.sub(u'',token)
             if token == u'':
                 continue
+            if not is_ascii(token):
+                token = "UNK_ID"
             if token.isdigit():
                 if args.replace == 1:
                     temp.append(tag2number)
@@ -300,7 +327,7 @@ with open(args.dev) as f:#dev_v1.1.json
             #continue
         #document
         #d_max_len = max(map(len,temp_facts)+[d_max_len])
-        dev_facts.append(list(pad_array(temp_facts,d_max_len))+[[0]*d_max_len]*(d_max_sent-len(temp_facts)))
+        dev_facts.append(list(pad_sequences(temp_facts,d_max_len))+[[0]*d_max_len]*(d_max_sent-len(temp_facts)))
         dev_d_length.append(len(temp_facts))
         d_max_sent = max(d_max_sent,len(temp_facts))
         dev_d_sent_len.append(map(len,temp_facts)+[0]*(d_max_sent-len(temp_facts)))
@@ -321,15 +348,15 @@ with open(args.dev) as f:#dev_v1.1.json
         dev_type.append(mapping[line['query_type']])
 
 train_facts = np.array(train_facts)
-train_question = pad_array(train_question,q_max_len)
-train_answer = pad_array(train_answer,a_max_len)#a_max_len = 40
+train_question = pad_sequences(train_question,q_max_len)
+train_answer = pad_sequences(train_answer,a_max_len)#a_max_len = 40
 train_d_length = np.array(train_d_length)
 train_q_length = np.array(train_q_length)
 train_a_length = np.array(train_a_length)
 train_d_sent_len = np.array(train_d_sent_len)
 dev_facts = np.array(dev_facts)
-dev_question = pad_array(dev_question,q_max_len)
-dev_answer = pad_array(dev_answer,a_max_len)#a_max_len = 40
+dev_question = pad_sequences(dev_question,q_max_len)
+dev_answer = pad_sequences(dev_answer,a_max_len)#a_max_len = 40
 dev_d_length = np.array(dev_d_length)
 dev_q_length = np.array(dev_q_length)
 dev_a_length = np.array(dev_a_length)
@@ -349,7 +376,7 @@ rnn_size = args.rnn_size
 layer = 1
 embedding_size = args.embedding_size
 index_list = np.array(range(len(train_answer)))
-model = qaseq.Model(d_max_length=d_max_len,q_max_length=q_max_len,a_max_length=a_max_len,num_symbol=num_symbol,rnn_size=rnn_size,layer=layer,embedding_size=embedding_size,d_max_sent=d_max_sent,hop = args.hop, fine_tune=args.fine_tune,vrae=args.vrae)
+model = qaseq.Model(d_max_length=d_max_len,q_max_length=q_max_len,a_max_length=a_max_len,num_symbol=num_symbol,rnn_size=rnn_size,layer=layer,embedding_size=embedding_size,d_max_sent=d_max_sent,hop = args.hop, fine_tune=args.fine_tune,vrae=args.vrae, sentence_reader=args.sentence_reader)
 model.build_model()
 print d_max_len,q_max_len,a_max_len,num_symbol,rnn_size,layer,embedding_size,d_max_sent
 batch_size = args.batch_size

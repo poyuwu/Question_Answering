@@ -3,18 +3,6 @@ import numpy as np
 from seq2seq import prelu, sample
 #import seq2seq
 
-#def norm(tensor):#normalzie last line
-#    """ Normalize tensor alone last dimension. Be equal to tf.nn.l2_normalize
-#        
-#        Args:
-#          tensor: a tensorflow tensor
-#        
-#        Returns: 
-#          return a normalized tensor, 1e-12 for avoiding zero division
-#    """
-#    return tensor/(tf.sqrt(tf.reduce_sum(tf.square(tensor),-1,keep_dims=True))+1e-12)
-#def cos(tensor1,tensor2):#by last dimension
-#    return tf.reduce_sum(tf.mul(norm(tensor1),norm(tensor2)),axis=-1)
 def last_relevant(output, length):
     """ Return last time step of RNNs
         Args:
@@ -44,7 +32,7 @@ def softmax(inputs,mask):
     sigma = tf.reduce_sum(inputs,axis=1,keep_dims=True)
     return inputs/(sigma+1e-12) 
 class Model():
-    def __init__(self,d_max_length=100,q_max_length=27,a_max_length=27,rnn_size=64,embedding_size=300,num_symbol=10000,layer=2,d_max_sent=29,hop=3,fine_tune=True,vrae=False):
+    def __init__(self,d_max_length=100,q_max_length=27,a_max_length=27,rnn_size=64,embedding_size=300,num_symbol=10000,layer=2,d_max_sent=29,hop=3,fine_tune=True,vrae=False,sentence_reader="PS"):
         tf.reset_default_graph()
         self.d_max_sent = d_max_sent
         self.d_max_length = d_max_length
@@ -73,6 +61,7 @@ class Model():
         self.l2_loss2 = tf.constant(0.0)
         self.fine_tune = fine_tune
         self.vrae = vrae
+        self.sentence_reader = sentence_reader
     def positional_encoding(self,D,M):
         encoding = np.zeros([D, M])
         for j in range(M):
@@ -134,27 +123,34 @@ class Model():
             vae_decoder = prelu(tf.matmul(z,W_z)+bias_z)
 
         ## read document to sentence vector
-        #1
-        '''
-        # East to overfit
-        reader_out = []
-        for i in range(self.d_max_sent):
-            with tf.variable_scope('reader') as vs:
-                if i>0: vs.reuse_variables()
-                temp, _ = tf.nn.dynamic_rnn(self.cell,
-                                            tf.nn.embedding_lookup(self.encoder_W,self.input_net['d'][:,i]),
-                                            sequence_length=self.input_net['d_mask'][:,i],
-                                            dtype=tf.float32)
-                reader_out.append(last_relevant(temp,self.input_net['d_mask'][:,i]))
-        '''
+        input_embed = tf.nn.embedding_lookup(self.encoder_W, self.input_net['d'])
+        #1 RNN
+        if self.sentence_reader == "RNN":
+            input_embed = tf.unpack(input_embed, axis=1)
+            # East to overfit
+            reader_out = []
+            for i in range(self.d_max_sent):
+                with tf.variable_scope('reader') as vs:
+                    if i>0: vs.reuse_variables()
+                    temp, _ = tf.nn.dynamic_rnn(self.cell,
+                                                input_embed[i],
+                                                sequence_length=self.input_net['d_mask'][:,i],
+                                                dtype=tf.float32)
+                    reader_out.append(last_relevant(temp,self.input_net['d_mask'][:,i]))
         #2 Position Encoding
-        ps = self.positional_encoding(self.embedding_size,self.d_max_length)
-        input_embed = tf.unpack(tf.nn.embedding_lookup(self.encoder_W, self.input_net['d']), axis=1)
-        #[tf.nn.embedding_lookup(self.encoder_W,sent) for sent in tf.unpack(self.input_net['d'],axis=1)]
-        #len = self.d_max_sent
-        d_mask = [tf.sequence_mask(mask,self.d_max_length,dtype=tf.float32) for mask in tf.unpack(self.input_net['d_mask'],axis=1)]
-        reader_out = [tf.reduce_sum(ps * input_embed[i] * tf.expand_dims(d_mask[i],axis=2) ,axis=1)for i in range(self.d_max_sent)]
-        
+        elif self.sentence_reader == "PS":
+            input_embed = tf.unpack(input_embed, axis=1)
+            ps = self.positional_encoding(self.embedding_size,self.d_max_length)
+            #[tf.nn.embedding_lookup(self.encoder_W,sent) for sent in tf.unpack(self.input_net['d'],axis=1)]
+            #len = self.d_max_sent
+            d_mask = [tf.sequence_mask(mask,self.d_max_length,dtype=tf.float32) for mask in tf.unpack(self.input_net['d_mask'],axis=1)]
+            # List of 2d tensor
+            reader_out = [tf.reduce_sum(ps * input_embed[i] * tf.expand_dims(d_mask[i],axis=2) ,axis=1) for i in range(self.d_max_sent)]
+        #3 mean
+        elif self.sentence_reader == "MEAN":
+            reader_out = [tf.reduce_mean(input_embed[i],axis=1) for i in range(self.d_max_sent)]
+        else:
+            raise Exception("No type "+ self.sentence_reader)
         #question
         #1
         with tf.variable_scope('Question_reader') as vs:
@@ -205,7 +201,6 @@ class Model():
                 ## 1 ReLU, untied
                 self.m_prev = tf.nn.relu(tf.matmul(tf.concat(1,[self.m_prev,self.context_vec,last_q]),mem_update)+bias)
                 ## 2 tied model
-        self.attention_weight = tf.pack(self.attention_weight,axis=1)
             #    _, self.m_prev = tf.nn.dynamic_rnn(
             #        self.result_cell,
             #        tf.expand_dims(self.context_vec,axis=1),
@@ -215,6 +210,7 @@ class Model():
             #        temp,
             #        sequence_length=self.input_net['d_sent_mask'],
             #        dtype=tf.float32)
+        self.attention_weight = tf.pack(self.attention_weight,axis=1)
         # output projection and sampled loss function
         self.output_projection = None
         softmax_loss_function = None
